@@ -6,6 +6,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 from typing import Dict, Any, TypedDict, Optional
 import time
+import zipfile
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -365,6 +366,86 @@ def assemble_output(boomi_prompt: str, mapping_table: str, connections_table: st
     ]
     return "\n\n".join(parts)
 
+
+def _strip_code_fences(markdown: str) -> str:
+    t = markdown.strip()
+    if t.startswith("```"):
+        # remove first fence line
+        lines = t.splitlines()
+        # drop first line (``` or ```markdown)
+        lines = lines[1:]
+        # drop trailing ``` if present
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        return "\n".join(lines)
+    return markdown
+
+
+def _parse_markdown_table(md_table: str) -> Dict[str, Any]:
+    """Parse a GitHub-flavored markdown table into headers and rows.
+    Returns {"headers": List[str], "rows": List[List[str]]}. Best-effort; ignores malformed lines.
+    """
+    text = _strip_code_fences(md_table)
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    # find header and separator
+    header_idx = None
+    sep_idx = None
+    for i, ln in enumerate(lines):
+        if "|" in ln and not ln.lower().startswith("note:"):
+            # heuristic: next line has dashes separated by |
+            if i + 1 < len(lines):
+                nxt = lines[i + 1]
+                if "|" in nxt and re.search(r"-", nxt):
+                    header_idx = i
+                    sep_idx = i + 1
+                    break
+    if header_idx is None or sep_idx is None:
+        return {"headers": [], "rows": []}
+    # split header
+    def split_row(s: str) -> list[str]:
+        parts = [p.strip() for p in s.strip("|").split("|")]
+        return parts
+
+    headers = split_row(lines[header_idx])
+    data_rows: list[list[str]] = []
+    for ln in lines[sep_idx + 1:]:
+        if not ("|" in ln):
+            break
+        row = split_row(ln)
+        # pad/truncate to header length
+        if len(row) < len(headers):
+            row += [""] * (len(headers) - len(row))
+        elif len(row) > len(headers):
+            row = row[:len(headers)]
+        data_rows.append(row)
+    return {"headers": headers, "rows": data_rows}
+
+
+def markdown_mapping_to_excel_bytes(md_table: str) -> bytes:
+    """Create an Excel workbook from a Markdown mapping table and return bytes."""
+    try:
+        from openpyxl import Workbook  # type: ignore
+    except Exception:
+        # If openpyxl is not available, return an empty minimal workbook-like CSV as fallback in XLSX name
+        buf = io.BytesIO()
+        buf.write(b"SourceField,SourceType,TargetField,TargetType,TransformationLogic\n")
+        return buf.getvalue()
+
+    parsed = _parse_markdown_table(md_table)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Mapping"
+    headers = parsed.get("headers") or ["SourceField", "SourceType", "TargetField", "TargetType", "TransformationLogic"]
+    rows = parsed.get("rows") or [["Not Specified", "", "", "", ""]]
+
+    ws.append(headers)
+    for r in rows:
+        ws.append(r)
+
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue()
+
 ## -------- LangGraph Node Functions --------
 
 def node_parse(state: PipelineState) -> PipelineState:
@@ -430,7 +511,12 @@ async def process_pdf(file: UploadFile = File(...)):
     # Execute LangGraph pipeline
     result_state: PipelineState = GRAPH.invoke({"raw_text": raw_text, "job_id": job_id})  # type: ignore
     final_text = result_state.get("final_text") or "Processing failed to produce output"
-    TEMP_OUTPUTS[job_id] = {"content": final_text, "filename": f"boomi_conversion_{job_id}.md"}
+    mapping_tbl = result_state.get("mapping_table") or ""
+    TEMP_OUTPUTS[job_id] = {
+        "md_content": final_text,
+        "mapping_table": mapping_tbl,
+        "filename": f"boomi_conversion_{job_id}.zip",
+    }
     return ProcessResponse(job_id=job_id, download_url=f"/download/{job_id}")
 
 @app.get("/download/{job_id}")
@@ -438,7 +524,21 @@ async def download(job_id: str):
     item = TEMP_OUTPUTS.get(job_id)
     if not item:
         raise HTTPException(status_code=404, detail="Job ID not found")
-    return StreamingResponse(io.BytesIO(item["content"].encode("utf-8")), media_type="text/markdown", headers={
+
+    # Build ZIP in-memory
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        # Add Markdown
+        md_bytes = (item.get("md_content") or "").encode("utf-8")
+        md_name = (item.get("filename") or "output.zip").replace(".zip", ".md")
+        zf.writestr(md_name, md_bytes)
+        # Add Excel from mapping table
+        xlsx_bytes = markdown_mapping_to_excel_bytes(item.get("mapping_table") or "")
+        xlsx_name = (item.get("filename") or "output.zip").replace(".zip", "_mapping.xlsx")
+        zf.writestr(xlsx_name, xlsx_bytes)
+
+    zip_buf.seek(0)
+    return StreamingResponse(zip_buf, media_type="application/zip", headers={
         "Content-Disposition": f"attachment; filename={item['filename']}"
     })
 
