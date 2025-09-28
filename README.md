@@ -3,7 +3,7 @@
 A full-stack application to convert a BizTalk project analysis PDF into:
 
 1. A ready-to-use Boomi AI prompt
-2. Source-to-target field mappings (Markdown table)
+2. Source-to-target field mappings (Markdown table + Excel workbook)
 3. Connection objects listing with masked authentication details
 
 Technologies:
@@ -42,7 +42,9 @@ uvicorn app:app --reload --port 8000
 
 ### API
 - `POST /process-pdf` multipart form-data with field `file` (PDF). Returns JSON: `{ job_id, download_url }`
-- `GET /download/{job_id}` returns the generated text file
+- `GET /download/{job_id}` returns a ZIP (application/zip) containing:
+   - `<job_id>.md` — the Markdown report with Boomi prompt, mapping table, and masked connections
+   - `<job_id>_mapping.xlsx` — the Excel workbook (sheet: "Mapping") generated from the mapping table
 - `GET /health` health check
 
 ## Frontend Setup
@@ -59,10 +61,9 @@ The frontend expects backend at `http://localhost:8000`.
 1. Start backend (`uvicorn ...`)
 2. Start frontend (`npm run dev`)
 3. Upload the BizTalk analysis PDF
-4. When processing completes, click the download link to obtain the text file containing:
-   - Boomi AI prompt
-   - Source↔Target mapping table
-   - Connection objects with masked credentials
+4. When processing completes, click the download link to obtain a ZIP containing:
+   - Markdown report (.md) with the Boomi AI prompt, mapping table, and masked connections
+   - Excel workbook (.xlsx) of the source↔target mapping (sheet name: "Mapping")
 
 ## Notes
 - PDF parsing uses `pypdf` (basic text extraction). Improve with `pdfplumber` if layout issues arise.
@@ -71,6 +72,7 @@ The frontend expects backend at `http://localhost:8000`.
 - No persistence layer; results stored in-memory and lost on server restart.
 - CORS is enabled for `http://localhost:5173` by default. Add more via `CORS_EXTRA_ORIGINS` (comma-separated) env var.
 - Boomi prompt generation is logged (INFO level) truncated to 800 chars; adjust with `LOG_LEVEL` env var.
+- The Excel file is created from the Markdown mapping table using `openpyxl` and included in the ZIP returned by `/download/{job_id}`.
 
 ## Logging
 - Detailed LLM prompt/response logs are written to `backend/logs/llm.log` with rotation (5 MB per file, 5 backups).
