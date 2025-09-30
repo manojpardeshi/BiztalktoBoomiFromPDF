@@ -40,6 +40,35 @@ pip install -r requirements.txt
 uvicorn app:app --reload --port 8000
 ```
 
+## Run with Docker (optional)
+
+### Prereqs
+- Docker Desktop or a compatible Docker engine
+
+### Using Docker Compose
+```bash
+# From repo root
+docker compose build
+docker compose up -d
+```
+
+Services:
+- Backend: http://localhost:8000
+- Frontend: http://localhost:5173
+
+Notes:
+- Backend reads environment from `backend/.env` (mounted via `env_file` in `docker-compose.yml`).
+- Update the frontend to point at `http://localhost:8000` (default already expects this).
+- To view logs:
+```bash
+docker compose logs -f backend
+docker compose logs -f frontend
+```
+- To stop/remove:
+```bash
+docker compose down
+```
+
 ### API
 - `POST /process-pdf` multipart form-data with field `file` (PDF). Returns JSON: `{ job_id, download_url }`
 - `GET /download/{job_id}` returns a ZIP (application/zip) containing:
